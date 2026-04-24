@@ -3,20 +3,43 @@ import io
 
 import hug
 import numpy as np
-import tensorflow as tf
+import tensorflow as _tf
+from packaging import version
+if version.parse(_tf.__version__) >= version.parse("2.0.0"):
+    tf = _tf.compat.v1
+    tf.disable_v2_behavior()
+else:
+    tf = _tf
 from PIL import Image
 
+from pathlib import Path
+import os
+model_path = os.getenv('MODEL_PATH', './2019-05-16_faster-rcnn-inception-resnet-v2.pb')
+model_type = os.getenv('MODEL_TYPE', 'tf1')
+static_dir = os.getenv('STATIC_DIR', './dist')
 
-# Initialize graph
-detection_graph = tf.Graph()
-detection_graph.as_default()
-od_graph_def = tf.GraphDef()
-with tf.gfile.GFile('model.pb', 'rb') as fid:
-    serialized_graph = fid.read()
-    od_graph_def.ParseFromString(serialized_graph)
-    tf.import_graph_def(od_graph_def, name='')
-sess = tf.Session()
+IS_YOLO    = model_type.lower() == 'yolo'
+IS_TF1     = model_type.lower() == 'tf1'
 
+if not Path(model_path).exists():
+    raise FileNotFoundError("Model file not found: {}".format(model_path))
+
+if IS_TF1:
+    # Initialize graph
+    detection_graph = tf.Graph()
+    detection_graph.as_default()
+    od_graph_def = tf.GraphDef()
+    with tf.gfile.GFile(model_path, 'rb') as fid:
+        serialized_graph = fid.read()
+        od_graph_def.ParseFromString(serialized_graph)
+        tf.import_graph_def(od_graph_def, name='')
+    sess = tf.Session()
+elif IS_YOLO:
+    from ultralytics import YOLO, settings
+    settings.update({'sync': False})
+    model = YOLO(model_path)
+else:
+    raise ValueError('Unsupported model type: {}'.format(model_type))
 
 @hug.response_middleware()
 def process_data(request, response, resource):
@@ -45,37 +68,62 @@ def compare_measure_bounding_boxes(self, other):
 
 
 def infer(image: np.ndarray):
-    ops = tf.get_default_graph().get_operations()
-    all_tensor_names = {output.name for op in ops for output in op.outputs}
-    tensor_dict = {}
-    for key in [
-        'num_detections',
-        'detection_boxes',
-        'detection_scores',
-        'detection_classes'
-    ]:
-        tensor_name = key + ':0'
+    output_dict = {}
 
-        if tensor_name in all_tensor_names:
-            tensor_dict[key] = tf.get_default_graph().get_tensor_by_name(tensor_name)
+    if IS_TF1:
+        ops = tf.get_default_graph().get_operations()
+        all_tensor_names = {output.name for op in ops for output in op.outputs}
+        tensor_dict = {}
+        for key in [
+            'num_detections',
+            'detection_boxes',
+            'detection_scores',
+            'detection_classes'
+        ]:
+            tensor_name = key + ':0'
 
-    image_tensor = tf.get_default_graph().get_tensor_by_name('image_tensor:0')
+            if tensor_name in all_tensor_names:
+                tensor_dict[key] = tf.get_default_graph().get_tensor_by_name(tensor_name)
 
-    # Run inference
-    output_dict = sess.run(tensor_dict, feed_dict={image_tensor: np.expand_dims(image, 0)})
+        image_tensor = tf.get_default_graph().get_tensor_by_name('image_tensor:0')
 
-    # All outputs are float32 numpy arrays, so convert types as appropriate
-    output_dict['num_detections'] = int(output_dict['num_detections'][0])
-    output_dict['detection_classes'] = output_dict['detection_classes'][0].astype(np.uint8)
-    output_dict['detection_boxes'] = output_dict['detection_boxes'][0]
-    output_dict['detection_scores'] = output_dict['detection_scores'][0]
+        # Run inference
+        output_dict = sess.run(tensor_dict, feed_dict={image_tensor: np.expand_dims(image, 0)})
+
+        # All outputs are float32 numpy arrays, so convert types as appropriate
+        output_dict['num_detections'] = int(output_dict['num_detections'][0])
+        output_dict['detection_classes'] = output_dict['detection_classes'][0].astype(np.uint8)
+        output_dict['detection_boxes'] = output_dict['detection_boxes'][0]
+        output_dict['detection_scores'] = output_dict['detection_scores'][0]
+    elif IS_YOLO:
+        results = model(image)
+
+        for result in results:
+            boxes = result.boxes
+
+            output_dict['num_detections']    = len(boxes)
+            output_dict['detection_classes'] = []
+            output_dict['detection_boxes']   = []
+            output_dict['detection_scores']  = []
+
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxyn.tolist()[0]
+                detection_box = [y1, x1, y2, x2] # y1, x1, y2, x2 sic!
+
+                mapped_cls = 1 if int(box.cls[0]) == 0 else -1
+
+                output_dict['detection_classes'].append(mapped_cls)
+                output_dict['detection_boxes'].append(detection_box)
+                output_dict['detection_scores'].append(float(box.conf[0]))
+    else:
+        raise ValueError('Unsupported model type: {}'.format(model_type))
 
     return output_dict
 
 
 @hug.static('/')
 def user_interface():
-    return('/usr/src/app',)
+    return (static_dir,)
 
 
 @hug.post('/upload')
