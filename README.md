@@ -12,7 +12,7 @@ This code was meant as a quick functional demonstration. It is **not** productio
 
 2. Build the Docker image. If you want to use the original base image (i.e., `tensorflow/tensorflow:1.13.1-py3`), omit `--build-arg BUILD_IMAGE="python:3.12-slim"`.
 ```bash
-docker build --build-arg BUILD_IMAGE="python:3.12-slim" measure-detector:latest
+docker build --build-arg BUILD_IMAGE="python:3.12-slim" -t measure-detector:latest .
 ```
 
 3. If you want to use the original model, run the container in a terminal:
